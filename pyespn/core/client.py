@@ -236,6 +236,11 @@ class PYESPN:
                                     league_abbv=self._league_abbv,
                                     espn_instance=self)
 
+    def get_game_info_test(self, team1, team2):
+        return get_game_id_by_team_abbrv(team1_abbv="HOU",
+                                         team2_abbv="LAC",
+                                         league_abbv=self._league_abbv)
+
     def get_player_ids(self) -> list:
         """
         Retrieves the IDs of all players in the league.

@@ -42,3 +42,13 @@ def get_events_by_team(team_id, season, league_abbv) -> list[Event]:
     url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/seasons/{season}/teams/{team_id}/events?lang=en&region=us'
     content = fetch_espn_data(url)
     return content
+
+def get_game_id_by_team_abbrv(team1_abbv, team2_abbv, league_abbv) -> int:
+    api_info = lookup_league_api_info(league_abbv=league_abbv)
+    url = f'http://site.api.espn.com/apis/site/{v}/sports/{api_info["sport"]}/{api_info["league"]}/events?lang=en&region=us'
+    content = fetch_espn_data(url)
+    for event in content['events']:
+        if team1_abbv in event['shortName'] and team2_abbv in event['shortName']:
+            return int(event['id'])
+    
+    return None
