@@ -1,6 +1,7 @@
 from pyespn.data.leagues import LEAGUE_API_MAPPING
 from pyespn.exceptions import API400Error, NoDataReturnedError
-import requests
+import aiohttp
+import asyncio
 
 
 def lookup_league_api_info(league_abbv) -> dict:
@@ -42,41 +43,43 @@ def check_response_code(content: dict):
                               error_message=content.get('error').get('message'))
 
 
-def fetch_espn_data(url: str) -> dict:
+async def fetch_espn_data(url: str, session: aiohttp.ClientSession) -> dict:
     """
     Fetches data from the specified URL and returns it as a parsed dictionary.
 
     Args:
         url (str): The URL from which to fetch the data.
+        session (aiohttp.ClientSession): The aiohttp session to use for the request.
 
     Returns:
         dict or None: The parsed JSON response from the URL if successful, otherwise None.
 
     Raises:
         NoDataReturnedError: If the response contains no items or an unexpected response code is encountered.
-        requests.exceptions.RequestException: If there is a network or HTTP request error.
+        aiohttp.ClientError: If there is a network or HTTP request error.
         ValueError: If the response cannot be parsed as JSON.
 
     Example:
-        >>> url = "https://api.espn.com/v2/sports/football"
-        >>> data = fetch_espn_data(url)
+        >>> async with aiohttp.ClientSession() as session:
+        >>>     url = "https://api.espn.com/v2/sports/football"
+        >>>     data = await fetch_espn_data(url, session)
     """
 
     try:
-        response = requests.get(url)
+        async with session.get(url) as response:
+            content = await response.json()  # Automatically parses JSON
 
-        content = response.json()  # Automatically parses JSON
+            check_response_code(content)
 
-        check_response_code(content)
+            items_count = content.get('items', '').__len__
+            # if items_count == 0 and content_count != 5:
+            if items_count == 0 and 'items' in content:
+                # Some endpoints return status code inside the JSON body on success too, so be careful
+                # But here we are looking for error conditions
+                raise NoDataReturnedError(code=content.get('status', {}).get('code'))
 
-        items_count = content.get('items', '').__len__
-        content_count = content.__len__
-        #if items_count == 0 and content_count != 5:
-        if items_count == 0 and 'items' in content:
-            raise NoDataReturnedError(code=content.get('status', {}).get('code'))
-
-        return content
-    except requests.exceptions.RequestException as e:
+            return content
+    except aiohttp.ClientError as e:
         print(f"Request failed: {e}")
     except ValueError as ve:
         print(f"Data error: {ve}")

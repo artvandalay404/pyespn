@@ -4,6 +4,7 @@ from pyespn.classes.event import Event
 from pyespn.classes.image import Image
 from pyespn.classes.stat import StatCategory
 from pyespn.utilities import fetch_espn_data, get_an_id
+import asyncio
 
 
 @validate_json('player_json')
@@ -216,7 +217,7 @@ class Player:
                 self.vehicles.append(Vehicle(vehicle_json=vehicle,
                                              espn_instance=self._espn_instance))
 
-    def load_player_historical_stats(self) -> None:
+    async def load_player_historical_stats(self) -> None:
         """
         Loads the historical statistics for the player.
 
@@ -227,11 +228,12 @@ class Player:
             None
         """
 
-        self._stats = self.get_players_historical_stats_core(player_id=self._id,
+        self._stats = await self.get_players_historical_stats_core(player_id=self._id,
                                                              league_abbv=self._espn_instance.league_abbv,
-                                                             espn_instance=self._espn_instance)
+                                                             espn_instance=self._espn_instance,
+                                                             session=self.espn_instance.session)
 
-    def load_player_box_scores_season(self, season):
+    async def load_player_box_scores_season(self, season):
         """
         Loads the player's box score statistics for every game in the given season.
 
@@ -249,39 +251,47 @@ class Player:
                 - 'stats' (List[`StatCategory`]): A list of stat category objects for that game.
         """
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/seasons/{season}/athletes/{self._id}/eventlog'
-        page_content = fetch_espn_data(url)
+        page_content = await fetch_espn_data(url, self.espn_instance.session)
         pages = page_content.get('events', {}).get('pageCount', 0)
 
+        page_urls = [f'{url}?page={page}' for page in range(1, pages + 1)]
+        page_tasks = [fetch_espn_data(paged_url, self.espn_instance.session) for paged_url in page_urls]
+        pages_content = await asyncio.gather(*page_tasks)
+
         event_list = []
-        for page in range(1, pages + 1):
-            paged_url = url + f'?page={page}'
-            event_log_content = fetch_espn_data(paged_url)
+        for event_log_content in pages_content:
             for event_log in event_log_content.get('events', {}).get('items', []):
                 event_list.append(event_log)
 
-        event_stats_log = []
-        for event in event_list:
+        async def process_event_log(event):
             event_id = get_an_id(event.get('event', {}).get('$ref'), 'events')
+            # Check if event is already loaded in the league object
+            # Note: access to league object might need review if it's not fully populated?
+            # But here we just check if it exists in cache.
             event_find = self._espn_instance.league.get_event_by_season(season=season,
                                                                        event_id=event_id)
             if not event_find:
-                event_content = fetch_espn_data(event.get('event', {}).get('$ref'))
+                event_content = await fetch_espn_data(event.get('event', {}).get('$ref'), self.espn_instance.session)
                 event_find = Event(event_json=event_content,
                                    espn_instance=self._espn_instance)
             stats = []
             if event.get('played'):
-                stats_content = fetch_espn_data(event.get('statistics', {}).get('$ref'))
-
-                for category in stats_content.get('splits', {}).get('categories'):
-                    stats.append(StatCategory(record_json=category,
-                                              espn_instance=self._espn_instance))
-            event_record = {
+                stats_ref = event.get('statistics', {}).get('$ref')
+                if stats_ref:
+                    stats_content = await fetch_espn_data(stats_ref, self.espn_instance.session)
+                    for category in stats_content.get('splits', {}).get('categories', []):
+                        stats.append(StatCategory(record_json=category,
+                                                  espn_instance=self._espn_instance))
+            return {
                 'event': event_find,
                 'stats': stats,
             }
-            event_stats_log.append(event_record)
 
-        self._stats_game_log[season] = event_stats_log
+        # Process all events concurrently
+        event_tasks = [process_event_log(event) for event in event_list]
+        event_stats_log = await asyncio.gather(*event_tasks)
+
+        self._stats_game_log[season] = list(event_stats_log)
 
     def load_player_contracts(self):
         # todo i haven't seen this filled in at all yet in the api

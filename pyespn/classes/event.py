@@ -75,13 +75,15 @@ class Event:
         Args:
             event_json (dict): The JSON data containing event details.
             espn_instance (PYESPN): The parent `PYESPN` instance for API interaction.
-            load_game_odds (bool, optional): If True, fetch and load the betting odds
-                                             for the event. Defaults to False.
-            load_play_by_play (bool, optional): If True, fetch and load the play-by-play
-                                                data (either drives or plays depending
-                                                on sport). Defaults to False.
+            load_game_odds (bool, optional): If True, you must await `load_betting_odds()` manually after init.
+                                             This flag is kept for compatibility but does not trigger async load in __init__.
+            load_play_by_play (bool, optional): If True, you must await `load_play_by_play()` manually after init.
+                                                This flag is kept for compatibility but does not trigger async load in __init__.
         """
         from pyespn.classes.venue import Venue
+        import asyncio
+        import aiohttp
+        
         self.competition = None
         self.event_json = event_json
         self._espn_instance = espn_instance
@@ -114,12 +116,14 @@ class Event:
         self._competitors = []
         self.api_info = self._espn_instance.api_mapping
         self._load_teams()
-        self._load_competition_data()
+        # self._load_competition_data() # Cannot call async method in sync __init__
         self._load_competitors_data()
-        if load_game_odds:
-            self.load_betting_odds()
-        if load_play_by_play:
-            self.load_play_by_play()
+        
+        # NOTE: Cannot call async methods here. Users must call them explicitly.
+        # if load_game_odds:
+        #     self.load_betting_odds()
+        # if load_play_by_play:
+        #     self.load_play_by_play()
 
     def _load_competitors_data(self):
         from pyespn.classes.team import Competitor
@@ -245,7 +249,7 @@ class Event:
         """
         return f"<Event | {self.short_name} {self.date}>"
 
-    def load_broadcasts(self):
+    async def load_broadcasts(self):
         """
         Loads broadcast information for the current event from the ESPN API.
 
@@ -256,18 +260,18 @@ class Event:
             None
 
         Example:
-            >>> event.load_broadcasts()
+            >>> await event.load_broadcasts()
             >>> for broadcast in event.broadcasts:
             >>>     print(broadcast.display_name)
         """
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}/broadcasts'
-        broadcast_content = fetch_espn_data(url)
+        broadcast_content = await fetch_espn_data(url, self.espn_instance.session)
         for broadcast in broadcast_content.get('items', []):
             self._broadcasts.append(Broadcast(broadcast_json=broadcast,
                                               espn_instance=self._espn_instance,
                                               event_instance=self))
 
-    def load_officials(self):
+    async def load_officials(self):
         """
         Loads and initializes the officials assigned to this event.
 
@@ -281,21 +285,23 @@ class Event:
             None
 
         Example:
-            >>> event.load_officials()
+            >>> await event.load_officials()
             >>> for official in event.officials:
             >>>     print(official.name)
         """
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}/officials'
-        official_content = fetch_espn_data(url)
+        official_content = await fetch_espn_data(url, self.espn_instance.session)
         for official in official_content.get('items', []):
             self._officials.append(Official(official_json=official,
                                             espn_instance=self._espn_instance,
                                             event_instance=self))
 
     def load_game_leaders(self):
+        # TODO: Implement this method if needed, or remove if unused. It was just a URL definition before.
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}/leaders'
+        pass
 
-    def load_betting_odds(self):
+    async def load_betting_odds(self):
         """
         method to fetch and assign betting odds for the event.
 
@@ -305,45 +311,40 @@ class Event:
         """
 
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}/odds'
-        page_content = fetch_espn_data(url)
+        page_content = await fetch_espn_data(url, self.espn_instance.session)
         pages = page_content.get('pageCount', 0)
 
-        def fetch_and_parse_odds(page):
-            page_url = url + f'?page={page}'
-            odds_content = fetch_espn_data(page_url)
-            return [
-                GameOdds(odds_json=odd,
-                         espn_instance=self._espn_instance,
-                         event_instance=self)
-                for odd in odds_content.get('items', [])
-            ]
+        # Generate URLs for all pages
+        page_urls = [f'{url}?page={page}' for page in range(1, pages + 1)]
+        
+        # Fetch all pages concurrently
+        page_tasks = [fetch_espn_data(page_url, self.espn_instance.session) for page_url in page_urls]
+        pages_data = await asyncio.gather(*page_tasks)
 
         event_odds = []
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(fetch_and_parse_odds, page) for page in range(1, pages + 1)]
-            for future in as_completed(futures):
-                try:
-                    event_odds.extend(future.result())
-                except Exception as e:
-                    print(f"Error fetching betting odds page: {e}")
+        for odds_content in pages_data:
+             for odd in odds_content.get('items', []):
+                 event_odds.append(GameOdds(odds_json=odd,
+                                            espn_instance=self._espn_instance,
+                                            event_instance=self))
 
         self._odds = event_odds
 
-    def _load_competition_data(self):
+    async def load_competition_data(self):
         """
-        Private method to fetch and assign competition details for the event.
+        Public method to fetch and assign competition details for the event.
 
         This method retrieves the competition data for the event and initializes a `Competition`
         object using the JSON data, storing it in the `self.competition` attribute.
         """
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}'
-        competition_content = fetch_espn_data(url)
+        competition_content = await fetch_espn_data(url, self.espn_instance.session)
 
         self.competition = Competition(competition_json=competition_content,
                                        espn_instance=self._espn_instance,
                                        event_instance=self)
 
-    def load_play_by_play(self):
+    async def load_play_by_play(self):
         """
         Private method to load play-by-play data for the event.
 
@@ -351,44 +352,36 @@ class Event:
         `_load_basketball_plays()` for basketball and `_load_drive_data()` for football.
         """
         if self.api_info['sport'] == 'basketball':
-            self._load_basketball_plays()
+            await self._load_basketball_plays()
         elif self.api_info['sport'] == 'football':
-            self._load_drive_data()
+            await self._load_drive_data()
 
-    def _load_basketball_plays(self):
+    async def _load_basketball_plays(self):
         """
         Private method to fetch and assign play-by-play data for a basketball game.
 
-        Uses multi-threaded requests to efficiently load all play pages and converts each play
+        Uses asyncio to efficiently load all play pages and converts each play
         item into a `Play` object. The complete list is assigned to `self.plays`.
         """
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}/plays'
-        page_content = fetch_espn_data(url)
+        page_content = await fetch_espn_data(url, self.espn_instance.session)
         pages = page_content.get('pageCount', 0)
 
-        def fetch_and_parse_plays(page):
-            page_url = url + f'?page={page}'
-            play_content = fetch_espn_data(page_url)
-            return [
-                Play(play_json=play,
-                     espn_instance=self._espn_instance,
-                     event_instance=self,
-                     drive_instance=None)
-                for play in play_content.get('items', [])
-            ]
+        page_urls = [f'{url}?page={page}' for page in range(1, pages + 1)]
+        page_tasks = [fetch_espn_data(page_url, self.espn_instance.session) for page_url in page_urls]
+        pages_data = await asyncio.gather(*page_tasks)
 
         plays = []
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(fetch_and_parse_plays, page) for page in range(1, pages + 1)]
-            for future in as_completed(futures):
-                try:
-                    plays.extend(future.result())
-                except Exception as e:
-                    print(f"Error fetching plays page: {e}")
+        for play_content in pages_data:
+            for play in play_content.get('items', []):
+                 plays.append(Play(play_json=play,
+                                   espn_instance=self._espn_instance,
+                                   event_instance=self,
+                                   drive_instance=None)) # drive_instance None for bball?
 
         self._plays = plays
 
-    def _load_drive_data(self):
+    async def _load_drive_data(self):
         """
         Private method to fetch and assign drive data for a football game.
 
@@ -396,27 +389,19 @@ class Event:
         into a `Drive` object. The resulting list is stored in `self.drives`.
         """
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/events/{self._event_id}/competitions/{self._event_id}/drives'
-        page_content = fetch_espn_data(url)
+        page_content = await fetch_espn_data(url, self.espn_instance.session)
         pages = page_content.get('pageCount', 0)
 
-        def fetch_and_parse_drives(page):
-            page_url = url + f'?page={page}'
-            drive_content = fetch_espn_data(page_url)
-            return [
-                Drive(drive_json=drive,
-                      espn_instance=self._espn_instance,
-                      event_instance=self)
-                for drive in drive_content.get('items', [])
-            ]
+        page_urls = [f'{url}?page={page}' for page in range(1, pages + 1)]
+        page_tasks = [fetch_espn_data(page_url, self.espn_instance.session) for page_url in page_urls]
+        pages_data = await asyncio.gather(*page_tasks)
 
         drives = []
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(fetch_and_parse_drives, page) for page in range(1, pages + 1)]
-            for future in as_completed(futures):
-                try:
-                    drives.extend(future.result())
-                except Exception as e:
-                    print(f"Error fetching drive data page: {e}")
+        for drive_content in pages_data:
+            for drive in drive_content.get('items', []):
+                drives.append(Drive(drive_json=drive,
+                                    espn_instance=self._espn_instance,
+                                    event_instance=self))
 
         self._drives = drives
 

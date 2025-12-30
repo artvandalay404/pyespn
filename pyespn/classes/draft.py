@@ -22,6 +22,23 @@ class DraftPick:
         _get_pick_data(): Extracts and sets relevant data from the draft pick JSON.
     """
 
+    async def load(self):
+        """
+        Extracts and sets relevant data from the draft pick JSON asynchronously.
+        """
+        self.round_number = self.pick_json.get('round')
+        self.pick_number = self.pick_json.get('pick')
+        self.overall_number = self.pick_json.get('overall')
+        team_id = get_team_id(self.pick_json.get('team', {}).get('$ref'))
+        athlete_url = self.pick_json.get('athlete', {}).get('$ref')
+        self.team = self._espn_instance.get_team_by_id(team_id=team_id)
+
+        if athlete_url:
+            athlete_content = await fetch_espn_data(athlete_url, self._espn_instance.session)
+
+            self.athlete = Player(player_json=athlete_content,
+                                espn_instance=self.espn_instance)
+
     def __init__(self, espn_instance, pick_json):
         """
         Initializes a DraftPick instance with data from the provided JSON.
@@ -35,7 +52,7 @@ class DraftPick:
         self._espn_instance = espn_instance
         self.athlete = None
         self.team = None
-        self._get_pick_data()
+        # self._get_pick_data() # Removed sync call
 
     def __repr__(self) -> str:
         """
@@ -46,21 +63,6 @@ class DraftPick:
         """
         return f"<DraftPick | Round {self.round_number} - Pick {self.pick_number}>"
 
-    def _get_pick_data(self):
-        """
-        Extracts and sets relevant data from the draft pick JSON.
-        """
-        self.round_number = self.pick_json.get('round')
-        self.pick_number = self.pick_json.get('pick')
-        self.overall_number = self.pick_json.get('overall')
-        team_id = get_team_id(self.pick_json.get('team', {}).get('$ref'))
-        athlete_url = self.pick_json.get('athlete', {}).get('$ref')
-        self.team = self._espn_instance.get_team_by_id(team_id=team_id)
-
-        athlete_content = fetch_espn_data(athlete_url)
-
-        self.athlete = Player(player_json=athlete_content,
-                              espn_instance=self.espn_instance)
     @property
     def espn_instance(self):
         """

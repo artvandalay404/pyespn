@@ -1,5 +1,6 @@
 from pyespn.core.decorators import validate_json
-import requests
+import aiohttp
+import asyncio
 
 
 @validate_json("image_json")
@@ -89,15 +90,16 @@ class Image:
         """
         return self._name
 
-    def load_image(self) -> bytes:
+    async def load_image(self) -> bytes:
         """
         Downloads and returns the image content from the object's reference URL.
 
         Returns:
             bytes: The binary content of the image.
         """
-        image_request = requests.get(self._ref)
-        image = image_request.content
+        session = self.espn_instance.session
+        async with session.get(self._ref) as response:
+            image = await response.read()
         return image
 
     def to_dict(self) -> dict:

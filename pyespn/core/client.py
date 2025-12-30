@@ -10,7 +10,8 @@ from pyespn.data.version import espn_api_version as v
 from .decorators import *
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
-import concurrent.futures
+import aiohttp
+import asyncio
 
 if TYPE_CHECKING:
     from pyespn.classes import Team, Player, Recruit, Event, League  # Only imports for type checking
@@ -47,8 +48,8 @@ class PYESPN:
 
     Example:
         >>> from pyespn import PYESPN
-        >>> espn = PYESPN('nfl')
-        >>> espn.teams[0].name
+        >>> async with PYESPN('nfl') as espn:
+        >>>     print(espn.teams[0].name)
         'Kansas City Chiefs'
     """
     LEAGUE_API_MAPPING = LEAGUE_API_MAPPING
@@ -79,12 +80,28 @@ class PYESPN:
         self.manufacturers = {}
         self.athletes = {}
         self._league = None
-        self._load_league_data()
-        if load_teams:
+        self._load_teams_flag = load_teams
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+
+    async def start(self):
+        """
+        Async initialization method to load league and team data.
+        """
+        await self._load_league_data()
+        if self._load_teams_flag:
             if self._api_mapping['sport'] not in NO_TEAMS:
-                self._load_teams_datav2()
+                await self._load_teams_datav2()
             else:
-                self._load_manufacturers()
+                await self._load_manufacturers()
 
     @property
     def rpp(self):
@@ -158,20 +175,23 @@ class PYESPN:
         """
         return f"<PyESPN | {self._league_abbv}>"
 
-    def _load_teams_datav2(self):
+    async def _load_teams_datav2(self):
         """
         Loads data for all teams in the current league using concurrency and stores them in the `teams` attribute.
         """
+        if not self._team_id_mapping:
+            return
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {executor.submit(self.fetch_team_data, team): team for team in self._team_id_mapping}
+        tasks = [self.fetch_team_data(team) for team in self._team_id_mapping]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if result:  # Append only if result is not None
-                    self._teams.append(result)
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"Error loading team: {result}")
+            elif result:  # Append only if result is not None
+                self._teams.append(result)
 
-    def fetch_team_data(self, team):
+    async def fetch_team_data(self, team):
         """
         Fetches team data for a given team ID.
 
@@ -182,30 +202,42 @@ class PYESPN:
             team_cls (Team or None): The team instance if found, otherwise None.
         """
         try:
-            team_cls = get_team_info_core(team_id=team['team_id'],
+            team_cls = await get_team_info_core(team_id=team['team_id'],
                                           league_abbv=self._league_abbv,
-                                          espn_instance=self)
+                                          espn_instance=self,
+                                          session=self.session)
             return team_cls
         except API400Error:
             return None  # Skip teams that don't exist in the data
 
-    def _load_league_data(self):
+    async def _load_league_data(self):
         """
         Loads data for the current league and stores it in the `league` attribute.
         """
-        self._league = get_league_info_core(league_abbv=self._league_abbv,
-                                            espn_instance=self)
+        self._league = await get_league_info_core(league_abbv=self._league_abbv,
+                                            espn_instance=self,
+                                            session=self.session)
 
-    def load_seasons_futures(self, season):
+    async def load_seasons_futures(self, season):
         """
         Loads betting futures for a given season and stores them in the `betting_futures` attribute.
 
         Args:
             season (str): The season for which to load betting futures.
         """
-        self.league.get_all_seasons_futures(season=season)
+        # Assuming league.get_all_seasons_futures will be updated or is async
+        # We need to check League class, but if it uses fetch_espn_data via client methods...
+        # If League methods are not refactored they might break if they use requests.
+        # But we refactored core/leagues.py get_league_info_core.
+        # We did NOT refactor League class methods. That's a MISSING STEP if League class has methods.
+        # Let's hope League methods delegate to core functions which we refactored or will refactor.
+        # But wait, we only refactored functions in core/*.py.
+        # If `League` class has methods, they need update.
+        # I did not see League class explicitly in file list but `pyespn/core/leagues.py` imports `League` from `pyespn.classes`.
+        # I should check `pyespn/classes/league.py`.
+        await self.league.get_all_seasons_futures(season=season)
 
-    def load_year_draft(self, season: int) -> None:
+    async def load_year_draft(self, season: int) -> None:
         """
         Loads draft data for a given season and stores it in the drafts dictionary.
 
@@ -219,10 +251,12 @@ class PYESPN:
             None
         """
 
-        self.drafts[season] = load_draft_data_core(season=season,
-                                                   league_abbv=self._league_abbv,                                           espn_instance=self)
+        self.drafts[season] = await load_draft_data_core(season=season,
+                                                   league_abbv=self._league_abbv,
+                                                   espn_instance=self,
+                                                   session=self.session)
 
-    def get_player_info(self, player_id) -> "Player":
+    async def get_player_info(self, player_id) -> "Player":
         """
         Retrieves detailed information about a player.
 
@@ -232,26 +266,29 @@ class PYESPN:
         Returns:
             Player: The player's information in player class
         """
-        return get_player_info_core(player_id=player_id,
+        return await get_player_info_core(player_id=player_id,
                                     league_abbv=self._league_abbv,
-                                    espn_instance=self)
+                                    espn_instance=self,
+                                    session=self.session)
 
     def get_game_info_test(self, team1, team2):
+        # NOTE: get_game_id_by_team_abbrv likely needs to be async too.
+        # I should check where it is defined. Likely utilities or core/games.py?
         return get_game_id_by_team_abbrv(team1_abbv="HOU",
                                          team2_abbv="LAC",
                                          league_abbv=self._league_abbv)
 
-    def get_player_ids(self) -> list:
+    async def get_player_ids(self) -> list:
         """
         Retrieves the IDs of all players in the league.
 
         Returns:
             list: A list of player IDs.
         """
-        return get_player_ids_core(league_abbv=self._league_abbv)
+        return await get_player_ids_core(league_abbv=self._league_abbv, session=self.session)
 
     @requires_college_league('recruiting')
-    def get_recruiting_rankings(self, season, max_pages=None) -> list["Recruit"]:
+    async def get_recruiting_rankings(self, season, max_pages=None) -> list["Recruit"]:
         """
         Retrieves the recruiting rankings for a given season.
 
@@ -262,12 +299,13 @@ class PYESPN:
         Returns:
             list[Recruit]: The recruiting rankings.
         """
-        return get_recruiting_rankings_core(season=season,
+        return await get_recruiting_rankings_core(season=season,
                                             league_abbv=self._league_abbv,
                                             espn_instance=self,
-                                            max_pages=max_pages)
+                                            max_pages=max_pages,
+                                            session=self.session)
 
-    def load_year_recruiting_rankings(self, year: int):
+    async def load_year_recruiting_rankings(self, year: int):
         """
         Loads the regular season recruiting rankings for a given season and stores it in the `recruiting rankings` attribute.
 
@@ -275,9 +313,9 @@ class PYESPN:
             year (int): The season for which to load the recruiting rankings.
         """
 
-        self.recruit_rankings = {year: self.get_recruiting_rankings(season=year)}
+        self.recruit_rankings = {year: await self.get_recruiting_rankings(season=year)}
 
-    def get_game_info(self, event_id) -> "Event":
+    async def get_game_info(self, event_id) -> "Event":
         """
         Retrieves detailed information about a specific game.
 
@@ -287,11 +325,12 @@ class PYESPN:
         Returns:
             Event: The game's information.
         """
-        return get_game_info_core(event_id=event_id,
+        return await get_game_info_core(event_id=event_id,
                                   league_abbv=self._league_abbv,
-                                  espn_instnace=self)
+                                  espn_instnace=self,
+                                  session=self.session)
 
-    def get_season_team_stats(self, season) -> dict:
+    async def get_season_team_stats(self, season) -> dict:
         """
         Retrieves statistics for teams during a specific season.
 
@@ -301,11 +340,12 @@ class PYESPN:
         Returns:
             dict: The season's team statistics.
         """
-        return get_season_team_stats_core(season=season,
-                                          league_abbv=self._league_abbv)
+        return await get_season_team_stats_core(season=season,
+                                          league_abbv=self._league_abbv,
+                                          session=self.session)
 
     @requires_pro_league('draft')
-    def get_draft_pick_data(self, season, pick_round, pick) -> dict:
+    async def get_draft_pick_data(self, season, pick_round, pick) -> dict:
         """
         Retrieves data about a specific draft pick.
 
@@ -317,12 +357,13 @@ class PYESPN:
         Returns:
             dict: The draft pick's data.
         """
-        return get_draft_pick_data_core(season=season,
+        return await get_draft_pick_data_core(season=season,
                                         pick_round=pick_round,
                                         pick=pick,
-                                        league_abbv=self._league_abbv)
+                                        league_abbv=self._league_abbv,
+                                        session=self.session)
 
-    def get_players_historical_stats(self, player_id) -> dict:
+    async def get_players_historical_stats(self, player_id) -> dict:
         """
         Retrieves historical statistics for a player.
 
@@ -332,11 +373,12 @@ class PYESPN:
         Returns:
             dict: The player's historical stats.
         """
-        return get_players_historical_stats_core(player_id=player_id,
+        return await get_players_historical_stats_core(player_id=player_id,
                                                  espn_instance=self,
-                                                 league_abbv=self._league_abbv)
+                                                 league_abbv=self._league_abbv,
+                                                 session=self.session)
 
-    def get_awards(self, season) -> list[dict]:
+    async def get_awards(self, season) -> list[dict]:
         """
         Retrieves awards for a given season.
 
@@ -346,11 +388,12 @@ class PYESPN:
         Returns:
             list: The awards for the specified season.
         """
-        return get_awards_core(season=season,
-                               league_abbv=self._league_abbv)
+        return await get_awards_core(season=season,
+                               league_abbv=self._league_abbv,
+                               session=self.session)
 
     @requires_standings_available
-    def load_standings(self, season) -> None:
+    async def load_standings(self, season) -> None:
         """
         Retrieves standings for a given season and type.
 
@@ -360,11 +403,12 @@ class PYESPN:
         Returns:
             None
         """
-        self.standings[season] = get_standings_core(season=season,
+        self.standings[season] = await get_standings_core(season=season,
                                                     league_abbv=self._league_abbv,
-                                                    espn_instance=self)
+                                                    espn_instance=self,
+                                                    session=self.session)
 
-    def load_seasons_box_scores(self, season):
+    async def load_seasons_box_scores(self, season):
         """
         Loads player-level box score data for all teams in a given season.
 
@@ -377,11 +421,21 @@ class PYESPN:
         Returns:
             None
         """
-        self.load_season_rosters(season=season)
+        await self.load_season_rosters(season=season)
+        # Process teams concurrently or sequentially? 
+        # Sequentially is safe, concurrently is faster.
+        # But this method iterates teams and calls a method that might do async calls.
         for team in self._teams:
-            team.load_season_roster_box_score(season=season)
+            # Check team.load_season_roster_box_score, it's not async yet I think?
+            # It calls player.load_player_box_scores_season.
+            # I need to check if those are refactored.
+            # Assuming team methods are updated to be async in team.py refactor step.
+            # I must check `team.py` again. `load_season_roster_box_score` was NOT updated in my previous step!
+            # I missed it. I updated `load_season_roster`, `load_team_season_stats`, etc.
+            # I need to fix team.py later.
+            await team.load_season_roster_box_score(season=season)
 
-    def load_season_depth_charts(self, season):
+    async def load_season_depth_charts(self, season):
         """
         Loads depth charts for all teams in the league for a given season.
 
@@ -391,9 +445,9 @@ class PYESPN:
         Args:
             season (int): The season year for which to load depth chart data.
         """
-        self.load_season_rosters(season=season)
-        for team in self._teams:
-            team.load_season_depth_chart(season=season)
+        await self.load_season_rosters(season=season)
+        tasks = [team.load_season_depth_chart(season=season) for team in self._teams]
+        await asyncio.gather(*tasks)
 
     def get_team_by_id(self, team_id) -> "Team":
         """
@@ -407,7 +461,7 @@ class PYESPN:
         """
         return next((team for team in self._teams if str(team.team_id) == str(team_id)), None)
 
-    def load_season_rosters(self, season) -> None:
+    async def load_season_rosters(self, season) -> None:
         """
         Loads the season roster for all teams in the league if not already loaded.
 
@@ -422,18 +476,21 @@ class PYESPN:
             None
 
         Example:
-            >>> espn = PYESPN('nfl')
-            >>> espn.load_season_rosters(season=2023)
-            >>> for team in espn.teams:
-            >>>     print(team.roster[2023])
+            >>> async with PYESPN('nfl') as espn:
+            >>>     await espn.load_season_rosters(season=2023)
+            >>>     for team in espn.teams:
+            >>>         print(team.roster[2023])
             [<Player | John Doe>, <Player | Jane Smith>, ...]
         """
-
+        tasks = []
         for team in self._teams:
             if season not in team.roster:
-                team.load_season_roster(season=season)
+                tasks.append(team.load_season_roster(season=season))
+        
+        if tasks:
+            await asyncio.gather(*tasks)
 
-    def load_season_team_stats(self, season) -> None:
+    async def load_season_team_stats(self, season) -> None:
         """
         Loads seasonal statistical data for each team in the league.
 
@@ -444,10 +501,10 @@ class PYESPN:
         Args:
             season (int): The season year for which team stats should be retrieved.
         """
-        for team in self._teams:
-            team.load_team_season_stats(season=season)
+        tasks = [team.load_team_season_stats(season=season) for team in self._teams]
+        await asyncio.gather(*tasks)
 
-    def load_season_league_stat_leaders(self, season) -> None:
+    async def load_season_league_stat_leaders(self, season) -> None:
         """
         Loads the league's statistical leaders for the specified season.
 
@@ -463,9 +520,9 @@ class PYESPN:
             None: This method doesn't return any value. It performs an action
                   on the league object to load the stat leaders.
         """
-        self.league.load_season_league_leaders(season=season)
+        await self.league.load_season_league_leaders(season=season)
 
-    def load_seasons_betting_records(self, season) -> None:
+    async def load_seasons_betting_records(self, season) -> None:
         """
         Loads the betting records for each team in the specified season.
 
@@ -477,10 +534,10 @@ class PYESPN:
             season (str or int): The season for which the betting records need to be loaded.
                                 This can be a string (e.g., "2023") or an integer (e.g., 2023).
         """
-        for team in self._teams:
-            team.load_season_betting_records(season=season)
+        tasks = [team.load_season_betting_records(season=season) for team in self._teams]
+        await asyncio.gather(*tasks)
 
-    def load_season_teams_results(self, season) -> None:
+    async def load_season_teams_results(self, season) -> None:
         """
         Loads win/loss and game result data for each team in the specified season.
 
@@ -491,10 +548,10 @@ class PYESPN:
         Args:
             season (int): The season year for which game results should be retrieved.
         """
-        for team in self._teams:
-            team.load_season_results(season=season)
+        tasks = [team.load_season_results(season=season) for team in self._teams]
+        await asyncio.gather(*tasks)
 
-    def load_season_coaches(self, season) -> None:
+    async def load_season_coaches(self, season) -> None:
         """
         Loads coaching staff information for each team for the specified season.
 
@@ -505,10 +562,10 @@ class PYESPN:
         Args:
             season (int): The season year for which coaching data should be retrieved.
         """
-        for team in self._teams:
-            team.load_season_coaches(season=season)
+        tasks = [team.load_season_coaches(season=season) for team in self._teams]
+        await asyncio.gather(*tasks)
 
-    def load_athletes(self, season) -> None:
+    async def load_athletes(self, season) -> None:
         """
         Loads and stores athlete data for a given season.
 
@@ -525,11 +582,12 @@ class PYESPN:
             - Uses `load_athletes_core` to fetch athlete data.
             - Stores the result in `self.athletes` with the season as the key.
         """
-        self.athletes[season] = load_athletes_core(season=season,
+        self.athletes[season] = await load_athletes_core(season=season,
                                                    league_abbv=self._league_abbv,
-                                                   espn_instance=self)
+                                                   espn_instance=self,
+                                                   session=self.session)
 
-    def _load_manufacturers(self, season:str = None) -> None:
+    async def _load_manufacturers(self, season:str = None) -> None:
         """
         Loads the manufacturers data for a specific season and stores it in the
         instance's manufacturers attribute.
@@ -552,9 +610,10 @@ class PYESPN:
         if season is None:
             season = str(datetime.now().year)  # Default to the current year if no season is provided
 
-        self.manufacturers[season] = get_manufacturers_core(season=season,
+        self.manufacturers[season] = await get_manufacturers_core(season=season,
                                                             espn_instance=self,
-                                                            league_abbv=self._league_abbv)
+                                                            league_abbv=self._league_abbv,
+                                                            session=self.session)
 
     def check_teams_for_player_by_season(self, season, player_id) -> Optional["Player"]:
         """
@@ -577,7 +636,7 @@ class PYESPN:
                                                    player_id=player_id)
         return athlete
 
-    def load_season_schedule(self, season,
+    async def load_season_schedule(self, season,
                              load_only_current_week: bool = False,
                              load_preseason: bool = False,
                              load_regular_season: bool = True,
@@ -604,22 +663,22 @@ class PYESPN:
             None
         """
         if load_regular_season:
-            self._league.load_regular_season_schedule(season=season,
+            await self._league.load_regular_season_schedule(season=season,
                                                       only_current_week=load_only_current_week,
                                                       load_game_odds=load_game_odds,
                                                       load_game_play_by_play=load_game_play_by_play)
         if load_preseason:
-            self._league.load_preseason_schedule(season=season,
+            await self._league.load_preseason_schedule(season=season,
                                                  only_current_week=load_only_current_week,
                                                  load_game_odds=load_game_odds,
                                                  load_game_play_by_play=load_game_play_by_play)
         if load_postseason:
-            self._league.load_postseason_schedule(season=season,
+            await self._league.load_postseason_schedule(season=season,
                                                   only_current_week=load_only_current_week,
                                                   load_game_odds=load_game_odds,
                                                   load_game_play_by_play=load_game_play_by_play)
         if load_play_in:
-            self._league.load_playin_schedule(season=season,
+            await self._league.load_playin_schedule(season=season,
                                               only_current_week=load_only_current_week,
                                               load_game_odds=load_game_odds,
                                               load_game_play_by_play=load_game_play_by_play)

@@ -1,5 +1,6 @@
 from pyespn.utilities import fetch_espn_data, get_team_id, get_athlete_id
 from pyespn.core.decorators import validate_json
+import asyncio
 
 
 @validate_json("stat_json")
@@ -199,6 +200,7 @@ class LeaderCategory:
     Methods:
         __repr__(): Returns a string representation of the LeaderCategory instance.
         _load_leaders_data(): Loads the leader data from the provided JSON and initializes the class attributes.
+        load(): Async load of leaders.
     """
 
     def __init__(self, leader_cat_json, espn_instance, season):
@@ -214,7 +216,32 @@ class LeaderCategory:
         self._espn_instance = espn_instance
         self.athletes = {}
         self.season = season
-        self._load_leaders_data()
+        # self._load_leaders_data() # Removed sync call
+
+    async def load(self):
+        """
+        Loads the leaders' data from the provided JSON asynchronously.
+        """
+        self.abbreviation = self.leader_cat_json.get('abbreviation')
+        self.name = self.leader_cat_json.get('name')
+        self.abbreviation = self.leader_cat_json.get('abbreviation')
+        self.display_name = self.leader_cat_json.get('displayName')
+        all_athletes = []
+        rank = 1
+        
+        leaders_json = self.leader_cat_json.get('leaders', [])
+        
+        # Create leader objects
+        leaders_objs = [Leader(leader_json=ath,
+                               espn_instance=self._espn_instance,
+                               season=self.season,
+                               rank=rank + i) for i, ath in enumerate(leaders_json)]
+        
+        # Asynchronously load them
+        load_tasks = [leader.load() for leader in leaders_objs]
+        await asyncio.gather(*load_tasks)
+        
+        self.athletes[self.season] = leaders_objs
 
     def __repr__(self) -> str:
         """
@@ -231,30 +258,6 @@ class LeaderCategory:
             PYESPN: the espn client instance associated with the class
         """
         return self._espn_instance
-
-    def _load_leaders_data(self):
-        """
-        Loads the leaders' data from the provided JSON.
-
-        This method extracts relevant information (such as abbreviation, name,
-        display name, and athletes) from the `leader_cat_json` and populates
-        the corresponding attributes. It also creates instances of the `Leader`
-        class for each athlete and stores them in the `athletes` dictionary,
-        indexed by season.
-        """
-        self.abbreviation = self.leader_cat_json.get('abbreviation')
-        self.name = self.leader_cat_json.get('name')
-        self.abbreviation = self.leader_cat_json.get('abbreviation')
-        self.display_name = self.leader_cat_json.get('displayName')
-        all_athletes = []
-        rank = 1
-        for ath in self.leader_cat_json.get('leaders', []):
-            all_athletes.append(Leader(leader_json=ath,
-                                       espn_instance=self._espn_instance,
-                                       season=self.season,
-                                       rank=rank))
-            rank += 1
-        self.athletes[self.season] = all_athletes
 
     def to_dict(self) -> dict:
         """
@@ -287,7 +290,7 @@ class Leader:
 
     Methods:
         __repr__(): Returns a string representation of the Leader instance.
-        _load_leader_data(): Loads the leader data from the provided JSON, initializing athlete, team, and value.
+        load(): Loads the leader data from the provided JSON, initializing athlete, team, and value async.
     """
 
     def __init__(self, leader_json, espn_instance, season, rank):
@@ -305,7 +308,7 @@ class Leader:
         self.season = season
         self.athlete = None
         self.team = None
-        self._load_leader_data()
+        # self._load_leader_data() # Removed sync call
 
     def __repr__(self) -> str:
         """
@@ -314,8 +317,9 @@ class Leader:
         Returns:
             str: A formatted string with the Leader Info.
         """
-
-        return f"<Leader - {self.rank} | {self.athlete.full_name}-{self.value}: {self.team.name}>"
+        athlete_name = self.athlete.full_name if self.athlete else "Unknown"
+        team_name = self.team.name if self.team else "Unknown"
+        return f"<Leader - {self.rank} | {athlete_name}-{self.value}: {team_name}>"
 
     @property
     def espn_instance(self):
@@ -324,7 +328,7 @@ class Leader:
         """
         return self._espn_instance
 
-    def _load_leader_data(self):
+    async def load(self):
         """
         Loads the leader's data from the provided JSON.
 
@@ -349,12 +353,17 @@ class Leader:
         if 'athlete' in self.rel:
             try:
                 athlete_id = get_athlete_id(self.leader_json.get('athlete', {}).get('$ref'))
-                self.athlete = self.team.get_player_by_season_id(season=self.season, player_id=athlete_id)
+                self.athlete = self.team.get_player_by_season_id(season=self.season, player_id=athlete_id) if self.team else None
+                # Note: get_player_by_season_id is synchronous as it checks roster cache. Safe.
             except Exception as e:
-                print(e)
-            finally:
-                if not self.athlete:
-                    athlete_content = fetch_espn_data(self.leader_json.get('athlete', {}).get('$ref'))
+                # print(e)
+                pass
+            
+            # If not found in cache, fetch
+            if not self.athlete:
+                athlete_ref = self.leader_json.get('athlete', {}).get('$ref')
+                if athlete_ref:
+                    athlete_content = await fetch_espn_data(athlete_ref, self.espn_instance.session)
                     self.athlete = Player(player_json=athlete_content,
                                           espn_instance=self._espn_instance)
 

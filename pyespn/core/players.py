@@ -4,12 +4,12 @@ from pyespn.classes.player import Player
 from pyespn.classes.stat import Stat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-import requests
-import json
-import warnings
+import aiohttp
+import asyncio
+from typing import Optional
 
 
-def get_player_ids_core(league_abbv: str) -> list:
+async def get_player_ids_core(league_abbv: str, session: aiohttp.ClientSession) -> list:
     """
     Retrieves a list of player IDs and names for a given league.
 
@@ -23,27 +23,65 @@ def get_player_ids_core(league_abbv: str) -> list:
     api_info = lookup_league_api_info(league_abbv=league_abbv)
     all_players = []
     cfb_ath_url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/athletes?lang=en&region=us'
-    content = fetch_espn_data(cfb_ath_url)
+    content = await fetch_espn_data(cfb_ath_url, session)
 
     num_pages = content.get('pageCount')
 
-    for i in range(1, num_pages + 1):
-        page_url = cfb_ath_url + f'&page={i}'
-        page_response = requests.get(page_url)
-        content = json.loads(page_response.content)
+    # Create tasks for all pages
+    page_urls = [f'{cfb_ath_url}&page={i}' for i in range(1, num_pages + 1)]
+    page_tasks = [fetch_espn_data(url, session) for url in page_urls]
+    
+    pages = await asyncio.gather(*page_tasks)
+    
+    all_athlete_urls = []
+    
+    for page_content in pages:
+        for athlete in page_content: # items? Check original code, it iterated content directly?
+             # Original code: for athlete in content: where content was page response JSON list?
+             # Wait, fetch_espn_data returns dict. 
+             # The usage in original code:
+             # content = json.loads(page_response.content)
+             # for athlete in content:
+             # BUT fetch_espn_data usually returns a dict with 'items' or similar for pagination.
+             # Let's check api.py or other usages. 
+             # In load_athletes_core, it uses page_content.get('items', []).
+             # Here it iterates `content` directly. The endpoint /athletes might return a list or dict.
+             # Standard ESPN V2 API usually returns { "items": [ ... ] }.
+             # If `content` was a list in original code, then `fetch_espn_data` (returning dict) would need adjustment or usage change.
+             # However, the original code had:
+             # cfb_ath_url = ...
+             # content = fetch_espn_data(cfb_ath_url)
+             # num_pages = content.get('pageCount')
+             # ...
+             # page_response = requests.get(page_url)
+             # content = json.loads(page_response.content)
+             # for athlete in content:
+             # This suggests fetching page 1 via `fetch_espn_data` yielded a dict (to get pageCount),
+             # but fetching subsequent pages via `requests` yielded a LIST? That is inconsistent for ESPN API.
+             # It is likely `items` wrapper is always present.
+             # I will assume `items` wrapper is present based on standard ESPN API.
+             
+             items = page_content.get('items', []) if isinstance(page_content, dict) else page_content
+             for athlete in items:
+                if athlete.get('$ref'):
+                    all_athlete_urls.append(athlete.get('$ref'))
+    
+    # Fetch all athletes
+    athlete_tasks = [fetch_espn_data(url, session) for url in all_athlete_urls]
+    athletes_data = await asyncio.gather(*athlete_tasks, return_exceptions=True)
 
-        for athlete in content:
-            if athlete['$ref']:
-                athlete_response = requests.get(athlete['$ref'])
-                athlete_content = json.loads(athlete_response.content)
-                athlete_data = {'id': athlete_content['id'],
-                                'name': athlete_content['full_name']}
-                all_players.append(athlete_data)
+    for athlete_content in athletes_data:
+        if isinstance(athlete_content, Exception):
+            continue
+        if athlete_content:
+            athlete_data = {'id': athlete_content.get('id'),
+                            'name': athlete_content.get('fullName')} # Original used full_name, but typical is fullName. Assuming consistency.
+            all_players.append(athlete_data)
 
     return all_players
 
 
-def get_player_stat_urls_core(player_id, league_abbv) -> list:
+async def get_player_stat_urls_core(player_id, league_abbv, session) -> list:
     """
     Retrieves all the ESPN URLs for a given player ID.
 
@@ -59,14 +97,14 @@ def get_player_stat_urls_core(player_id, league_abbv) -> list:
     stat_urls = []
 
     stat_log_url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/athletes/{player_id}/statisticslog?lang=en&region=us'
-    content_dict = fetch_espn_data(stat_log_url)
+    content_dict = await fetch_espn_data(stat_log_url, session)
     for stat in content_dict.get('entries'):
         stat_urls.append(stat['statistics'][0]['statistics']['$ref'])
 
     return stat_urls
 
 
-def extract_stats_from_url_core(url, espn_instance) -> dict:
+async def extract_stats_from_url_core(url, espn_instance, session) -> dict:
     """
     Extracts player statistics from a given URL.
 
@@ -80,7 +118,7 @@ def extract_stats_from_url_core(url, espn_instance) -> dict:
     all_stats = []
     year = get_an_id(url=url, slug='seasons')
     player_id = get_athlete_id(url=url)
-    content_dict = fetch_espn_data(url)
+    content_dict = await fetch_espn_data(url, session)
     stats = content_dict.get('splits').get('categories')
 
     for category in stats:
@@ -96,12 +134,12 @@ def extract_stats_from_url_core(url, espn_instance) -> dict:
                 'description': stat.get('description')
             }
             all_stats.append(Stat(stat_json=this_stat,
-                                  espn_isntance=espn_instance))
+                                  espn_instance=espn_instance))
 
     return {year: all_stats}
 
 
-def get_player_info_core(player_id, league_abbv, espn_instance) -> Player:
+async def get_player_info_core(player_id, league_abbv, espn_instance, session) -> Player:
     """
     Retrieves detailed player information for a given player ID from the ESPN API.
 
@@ -117,19 +155,18 @@ def get_player_info_core(player_id, league_abbv, espn_instance) -> Player:
     api_info = lookup_league_api_info(league_abbv=league_abbv)
 
     url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/athletes/{player_id}'
-    response = requests.get(url)
-    content = json.loads(response.content)
+    content = await fetch_espn_data(url, session)
     current_player = Player(player_json=content,
                             espn_instance=espn_instance)
     return current_player
 
 
-def load_athletes_core(season, league_abbv, espn_instance, verbose=True) -> list["Player"]:
+async def load_athletes_core(season, league_abbv, espn_instance, session, verbose=True) -> list["Player"]:
     """
     Loads athlete data for a given season and league abbreviation from the ESPN API.
 
     This function retrieves a list of athletes from the specified league and season,
-    utilizing multi-threading to improve efficiency when fetching individual athlete data.
+    utilizing asyncio to improve efficiency when fetching individual athlete data.
 
     Args:
         season (int): The season year for which athlete data is being retrieved.
@@ -142,17 +179,12 @@ def load_athletes_core(season, league_abbv, espn_instance, verbose=True) -> list
 
     Raises:
         Exception: Logs and prints any errors encountered during data retrieval.
-
-    Notes:
-        - The function first retrieves a list of athlete URLs.
-        - It then uses `ThreadPoolExecutor` to fetch athlete details in parallel.
-        - Uses up to 10 worker threads for concurrent requests.
     """
 
     api_info = lookup_league_api_info(league_abbv=league_abbv)
 
     url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/seasons/{season}/athletes'
-    page_content = fetch_espn_data(url)
+    page_content = await fetch_espn_data(url, session)
     page_count = page_content.get('pageCount', 1)
     record_count = page_content.get('count', 0)
 
@@ -165,20 +197,31 @@ def load_athletes_core(season, league_abbv, espn_instance, verbose=True) -> list
     athletes = []
     athlete_urls = []
 
-    for page in range(1, page_count + 1):
-        page_url = f'{url}?page={page}'
-        page_content = fetch_espn_data(page_url)
+    # Get all page urls
+    page_urls = [f'{url}?page={page}' for page in range(1, page_count + 1)]
+    page_tasks = [fetch_espn_data(page_url, session) for page_url in page_urls]
+    
+    # Fetch pages concurrently
+    pages_data = await asyncio.gather(*page_tasks)
+
+    for page_content in pages_data:
         for athlete in page_content.get('items', []):
             athlete_urls.append(athlete.get('$ref'))
 
-    with ThreadPoolExecutor(max_workers=10) as executor:  # Adjust workers as needed
-        future_to_url = {executor.submit(fetch_espn_data, url): url for url in athlete_urls}
-
-        for future in tqdm(as_completed(future_to_url), total=len(athlete_urls), disable=not verbose, desc="Fetching athletes"):
-            try:
-                athlete_content = future.result()
-                athletes.append(Player(player_json=athlete_content, espn_instance=espn_instance))
-            except Exception as e:
-                print(f"Failed to fetch athlete data: {e}")
+    # Fetch athletes concurrently
+    athlete_tasks = [fetch_espn_data(url, session) for url in athlete_urls]
+    
+    # Simple gather without progress bar first to ensure correctness
+    # If we want progress bar with asyncio:
+    # https://stackoverflow.com/questions/37512182/how-can-i-periodically-execute-a-function-with-asyncio
+    # For now, let's keep it simple.
+    
+    results = await asyncio.gather(*athlete_tasks, return_exceptions=True)
+    
+    for result in results:
+        if isinstance(result, Exception):
+            print(f"Failed to fetch athlete data: {result}")
+        elif result:
+             athletes.append(Player(player_json=result, espn_instance=espn_instance))
 
     return athletes

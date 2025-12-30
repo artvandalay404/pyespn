@@ -3,9 +3,14 @@
 from pyespn.utilities import lookup_league_api_info, fetch_espn_data
 from pyespn.data.version import espn_api_version as v
 from pyespn.classes.standings import Standings
+import asyncio
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import aiohttp
 
 
-def get_standings_core(season, league_abbv, espn_instance):
+async def get_standings_core(season, league_abbv, espn_instance, session: "Optional[aiohttp.ClientSession]" = None):
     """
     Fetches and returns the standings for a given season and league.
 
@@ -16,6 +21,7 @@ def get_standings_core(season, league_abbv, espn_instance):
         season (int): The season year for which standings are to be retrieved.
         league_abbv (str): The abbreviation of the league (e.g., "f1" for Formula 1).
         espn_instance (object): An instance of the ESPN API client.
+        session (aiohttp.ClientSession): The aiohttp session to use for requests.
 
     Returns:
         list: A list of Standings objects containing the standings data.
@@ -24,25 +30,33 @@ def get_standings_core(season, league_abbv, espn_instance):
         Exception: If fetching data from the API fails.
 
     """
+    if session is None:
+        session = espn_instance.session
+
     api_info = lookup_league_api_info(league_abbv=league_abbv)
     if api_info.get('sport') == 'soccer':
         url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/seasons/{season}/types/1/standings'
     else:
         url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}/seasons/{season}/types/2/standings'
-    content = fetch_espn_data(url)
+    content = await fetch_espn_data(url, session)
     page_count = content.get('pageCount')
 
     standings = []
     standings_url = []
-    for page in range(1, page_count + 1):
-        paged_url = url + f'?page={page}'
-        paged_content = fetch_espn_data(paged_url)
+    
+    page_urls = [url + f'?page={page}' for page in range(1, page_count + 1)]
+    page_tasks = [fetch_espn_data(paged_url, session) for paged_url in page_urls]
+    pages_content = await asyncio.gather(*page_tasks)
 
+    for paged_content in pages_content:
         for item in paged_content.get('items', []):
             standings_url.append(item.get('$ref'))
 
-    for standing in standings_url:
-        standing_content = fetch_espn_data(standing)
+    # Fetch individual standing data
+    standing_tasks = [fetch_espn_data(url, session) for url in standings_url]
+    standing_contents = await asyncio.gather(*standing_tasks)
+
+    for standing_content in standing_contents:
         standings.append(Standings(standings_json=standing_content,
                                    espn_instance=espn_instance))
 

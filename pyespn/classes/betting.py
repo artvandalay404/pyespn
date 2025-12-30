@@ -1,6 +1,8 @@
 from pyespn.utilities import fetch_espn_data, get_team_id, get_athlete_id, camel_to_snake
 from pyespn.exceptions import API400Error, JSONNotProvidedError
 from pyespn.core.decorators import validate_json
+import asyncio
+
 STANDARDIZED_BETTING_PROVIDERS = ['ESPN BET', 'ESPN Bet - Live Odds']
 
 
@@ -36,7 +38,25 @@ class Betting:
         self._espn_instance = espn_instance
         self.season = season
         self.providers = []
-        self._set_betting_data()
+        # self._set_betting_data() # Removed sync call
+
+    async def load(self):
+        """
+        Parses and stores betting data, including providers, asynchronously.
+        """
+        self.id = self.betting_json.get('id')
+        self.ref = self.betting_json.get('$ref')
+        self.name = self.betting_json.get('name')
+        self.display_name = self.betting_json.get('displayName')
+        
+        provider_data = self.betting_json.get('futures', [])
+        self.providers = [Provider(espn_instance=self._espn_instance,
+                                   betting_instance=self,
+                                   line_json=p) for p in provider_data]
+        
+        # Async load providers
+        provider_tasks = [p.load() for p in self.providers]
+        await asyncio.gather(*provider_tasks)
 
     def __repr__(self) -> str:
         """
@@ -53,19 +73,6 @@ class Betting:
             PYESPN: the espn client instance associated with the class
         """
         return self._espn_instance
-
-    def _set_betting_data(self):
-        """
-        Private method to parse and store betting data, including providers.
-        """
-        self.id = self.betting_json.get('id')
-        self.ref = self.betting_json.get('$ref')
-        self.name = self.betting_json.get('name')
-        self.display_name = self.betting_json.get('displayName')
-        for provider in self.betting_json.get('futures'):
-            self.providers.append(Provider(espn_instance=self._espn_instance,
-                                           betting_instance=self,
-                                           line_json=provider))
 
     def to_dict(self) -> dict:
         """
@@ -112,7 +119,27 @@ class Provider:
         self.line_json = line_json
         self._espn_instance = espn_instance
         self.betting_instance = betting_instance
-        self._set_betting_provider_data()
+        self.all_lines = []
+        # self._set_betting_provider_data() # Removed sync call
+
+    async def load(self):
+        """
+        Parses and stores provider details, including betting lines, asynchronously.
+        """
+        self.provider_name = self.line_json.get('provider', {}).get('name')
+        self.id = self.line_json.get('provider', {}).get('id')
+        self.priority = self.line_json.get('provider', {}).get('priority')
+        self.active = self.line_json.get('provider', {}).get('active')
+        
+        books = self.line_json.get('books', [])
+        
+        self.all_lines = [Line(espn_instance=self._espn_instance,
+                               provider_instance=self,
+                               book_json=b) for b in books]
+        
+        # Async load lines
+        line_tasks = [l.load() for l in self.all_lines]
+        await asyncio.gather(*line_tasks)
 
     def __repr__(self) -> str:
         """
@@ -122,20 +149,6 @@ class Provider:
             str: A formatted string with the Providers information .
         """
         return f"<Provider | {self.provider_name} - {self._espn_instance.league_abbv}>"
-
-    def _set_betting_provider_data(self):
-        """
-        Private method to parse and store provider details, including betting lines.
-        """
-        self.provider_name = self.line_json.get('provider', {}).get('name')
-        self.id = self.line_json.get('provider', {}).get('id')
-        self.priority = self.line_json.get('provider', {}).get('priority')
-        self.active = self.line_json.get('provider', {}).get('active')
-        self.all_lines = []
-        for future_line in self.line_json.get('books', []):
-            self.all_lines.append(Line(espn_instance=self._espn_instance,
-                                       provider_instance=self,
-                                       book_json=future_line))
 
     def to_dict(self) -> dict:
         """
@@ -187,7 +200,7 @@ class Line:
         self.athlete = None
         self.team = None
         self.ref = None
-        self._set_line_data()
+        # self._set_line_data() # Removed sync call
 
     @property
     def espn_instance(self):
@@ -214,9 +227,9 @@ class Line:
 
         return f"<Betting Line: {msg}>"
 
-    def _set_line_data(self):
+    async def load(self):
         """
-        Private method to parse and store betting line details, including associated teams or athletes.
+        Parses and stores betting line details, including associated teams or athletes.
         """
         from pyespn.classes.player import Player
         from pyespn.classes.team import Team
@@ -228,14 +241,14 @@ class Line:
                 if not self.athlete:
 
                     self.ref = self.book_json.get('athlete').get('$ref')
-                    content = fetch_espn_data(self.ref)
+                    content = await fetch_espn_data(self.ref, self.espn_instance.session)
 
                     self.athlete = Player(espn_instance=self._espn_instance,
                                           player_json=content)
 
             if 'team' in self.book_json:
                 self.ref = self.book_json.get('team').get('$ref')
-                content = fetch_espn_data(self.ref)
+                content = await fetch_espn_data(self.ref, self.espn_instance.session)
 
                 self.team = Team(espn_instance=self._espn_instance,
                                  team_json=content)

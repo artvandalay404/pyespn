@@ -1,14 +1,14 @@
 from pyespn.core.decorators import validate_json
-from pyespn.utilities import fetch_espn_data
+from pyespn.utilities import (fetch_espn_data, get_an_id)
 from pyespn.exceptions import API400Error
 from pyespn.core.schedule import get_regular_season_schedule_core
 from pyespn.classes.betting import Betting
-from pyespn.classes.stat import LeaderCategory
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from pyespn.classes.stat import LeaderCategory, Leader
 from typing import TYPE_CHECKING
+import asyncio
 
 if TYPE_CHECKING:
-    from pyespn.classes import Event
+    from pyespn.classes import Schedule, Event
 
 
 @validate_json("league_json")
@@ -160,7 +160,7 @@ class League:
         # todo this seems to always return nothing
         url = f''
 
-    def load_regular_season_schedule(self, season,
+    async def load_regular_season_schedule(self, season,
                                      only_current_week: bool = False,
                                      load_game_odds: bool = False,
                                      load_game_play_by_play: bool = False):
@@ -181,21 +181,22 @@ class League:
               for the specified season.
 
         Example:
-            >>> espn.load_regular_season_schedule(2024, load_game_odds=True)
+            >>> await espn.load_regular_season_schedule(2024, load_game_odds=True)
             >>> schedule = espn._schedules[2024]
             >>> print(schedule.weeks)
         """
         self.load_game_odds = load_game_odds
         self.load_game_play_by_play = load_game_play_by_play
 
-        self._regular_schedules[season] = get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
+        self._regular_schedules[season] = await get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
                                                                            espn_instance=self._espn_instance,
                                                                            season=season,
+                                                                           session=self.espn_instance.session,
                                                                            current_week_only=only_current_week,
                                                                            load_odds=self.load_game_odds,
                                                                            load_pbp=self.load_game_play_by_play)
 
-    def load_postseason_schedule(self, season,
+    async def load_postseason_schedule(self, season,
                                  only_current_week: bool = False,
                                  load_game_odds: bool = False,
                                  load_game_play_by_play: bool = False):
@@ -215,22 +216,23 @@ class League:
               for the specified season.
 
         Example:
-            >>> espn.load_regular_season_schedule(2024, load_game_odds=True)
+            >>> await espn.load_postseason_schedule(2024, load_game_odds=True)
             >>> schedule = espn._post_schedules[2024]
             >>> print(schedule.weeks)
         """
         self.load_game_odds = load_game_odds
         self.load_game_play_by_play = load_game_play_by_play
 
-        self._post_schedules[season] = get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
+        self._post_schedules[season] = await get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
                                                                         espn_instance=self._espn_instance,
                                                                         season=season,
+                                                                        session=self.espn_instance.session,
                                                                         current_week_only=only_current_week,
                                                                         load_odds=self.load_game_odds,
                                                                         load_pbp=self.load_game_play_by_play,
-                                                                        season_type=3)
+                                                                        season_type='3')
 
-    def load_preseason_schedule(self, season,
+    async def load_preseason_schedule(self, season,
                                 only_current_week: bool = False,
                                 load_game_odds: bool = False,
                                 load_game_play_by_play: bool = False):
@@ -250,22 +252,23 @@ class League:
               for the specified season.
 
         Example:
-            >>> espn.load_regular_season_schedule(2024, load_game_odds=True)
+            >>> await espn.load_preseason_schedule(2024, load_game_odds=True)
             >>> schedule = espn._pre_schedules[2024]
             >>> print(schedule.weeks)
         """
         self.load_game_odds = load_game_odds
         self.load_game_play_by_play = load_game_play_by_play
 
-        self._pre_schedules[season] = get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
+        self._pre_schedules[season] = await get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
                                                                        espn_instance=self._espn_instance,
                                                                        season=season,
+                                                                       session=self.espn_instance.session,
                                                                        current_week_only=only_current_week,
                                                                        load_odds=self.load_game_odds,
                                                                        load_pbp=self.load_game_play_by_play,
-                                                                       season_type=0)
+                                                                       season_type='1')
 
-    def load_playin_schedule(self, season,
+    async def load_playin_schedule(self, season,
                              only_current_week: bool = False,
                              load_game_odds: bool = False,
                              load_game_play_by_play: bool = False):
@@ -285,20 +288,21 @@ class League:
               for the specified season.
 
         Example:
-            >>> espn.load_regular_season_schedule(2024, load_game_odds=True)
+            >>> await espn.load_playin_schedule(2024, load_game_odds=True)
             >>> schedule = espn._pre_schedules[2024]
             >>> print(schedule.weeks)
         """
         self.load_game_odds = load_game_odds
         self.load_game_play_by_play = load_game_play_by_play
 
-        self._playin_schedules[season] = get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
+        self._playin_schedules[season] = await get_regular_season_schedule_core(league_abbv=self._espn_instance.league_abbv,
                                                                           espn_instance=self._espn_instance,
                                                                           season=season,
+                                                                          session=self.espn_instance.session,
                                                                           current_week_only=only_current_week,
                                                                           load_odds=self.load_game_odds,
                                                                           load_pbp=self.load_game_play_by_play,
-                                                                          season_type=5)
+                                                                          season_type='5')
 
     def get_event_by_season(self, season, event_id) -> "Event":
         """
@@ -319,12 +323,12 @@ class League:
 
         return this_event
 
-    def get_all_seasons_futures(self, season):
+    async def get_all_seasons_futures(self, season):
         """
         Loads and processes betting futures for a given season.
 
         This method retrieves betting futures data for the specified season using the ESPN API.
-        It handles pagination and concurrent data fetching using thread pools for improved performance.
+        It handles pagination and concurrent data fetching using asyncio.
         Each betting item is processed individually through `_process_bet` and collected into a list.
 
         The processed futures are stored in `self._betting_futures` under the specified season key.
@@ -333,106 +337,87 @@ class League:
             season (int or str): The season year to fetch futures data for.
 
         Raises:
-            API400Error: If the ESPN API returns a 400-level error during data fetching, an error message
-                         will be printed including the season, team name, and team ID.
+            API400Error: If the ESPN API returns a 400-level error.
         """
+        # Ensure rosters are loaded for all teams
+        roster_tasks = []
         for team in self._espn_instance.teams:
             if season not in team.roster:
-                team.load_season_roster(season=season)
+                roster_tasks.append(team.load_season_roster(season=season))
+        if roster_tasks:
+            await asyncio.gather(*roster_tasks)
 
         betting_futures = []
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/seasons/{season}/futures'
 
         try:
-            season_content = fetch_espn_data(url)
+            season_content = await fetch_espn_data(url, self.espn_instance.session)
             pages = season_content.get('pageCount', 0)
 
-            with ThreadPoolExecutor() as executor:
-                future_to_page = {
-                    executor.submit(fetch_espn_data, f'{url}?page={page}'): page
-                    for page in range(1, pages + 1)
-                }
+            # Generate URLs for pages
+            page_urls = [f'{url}?page={page}' for page in range(1, pages + 1)]
+            
+            # Fetch all pages content concurrently
+            pages_data = await asyncio.gather(*[fetch_espn_data(u, self.espn_instance.session) for u in page_urls])
 
-                for future in as_completed(future_to_page):
-                    page_data = future.result()
-
-                    with ThreadPoolExecutor() as bet_executor:
-                        bet_futures = {
-                            bet_executor.submit(self._process_bet, bet, season): bet
-                            for bet in page_data.get('items', [])
-                        }
-
-                        # Process each bet as its future completes
-                        for bet_future in as_completed(bet_futures):
-                            betting_futures.append(bet_future.result())
+            # Process all items; _process_bet is synchronous data transform
+            for page_data in pages_data:
+                for bet in page_data.get('items', []):
+                    betting_futures.append(self._process_bet(bet, season))
 
             self._betting_futures[season] = betting_futures
 
         except API400Error as e:
-            print(f"Failed to fetch oddsbetting data for season {season} | team {self.name} | id {self.team_id}: {e}")
+            # Note: accessing self.team_id or self.name might fail as League doesn't seem to have team_id? 
+            # Original code said: "team {self.name} | id {self.team_id}".
+            # But League class has 'name' and 'id'.
+            print(f"Failed to fetch oddsbetting data for season {season} | league {self.name} | id {self.id}: {e}")
 
     def _process_bet(self, bet, season):
         """
         Processes an individual bet and returns a Betting object.
-
-        Args:
-            bet (dict): The betting data for an individual bet.
-
-        Returns:
-            Betting: The Betting object corresponding to the provided data.
         """
         return Betting(betting_json=bet, espn_instance=self._espn_instance, season=season)
 
     def fetch_leader_category(self, category, season) -> LeaderCategory:
         """
         Fetches leader category data for a specific category in the given season.
-
-        Args:
-            category (dict): The category data to be processed.
-            season (str): The season for which the leader data is fetched.
-
-        Returns:
-            LeaderCategory: The LeaderCategory object created for this category.
         """
         return LeaderCategory(leader_cat_json=category,
                               espn_instance=self._espn_instance,
                               season=season)
 
-    def load_season_league_leaders(self, season):
+    async def load_season_league_leaders(self, season):
         """
-        Fetches the league leaders for the given season using futures to process categories concurrently.
+        Fetches the league leaders for the given season using asyncio to process categories concurrently.
 
         Args:
             season (str): The season for which the league leaders are fetched.
         """
 
+        # Ensure rosters are loaded
+        roster_tasks = []
         for team in self._espn_instance.teams:
             if season not in team.roster:
-                team.load_season_roster(season=season)
+                roster_tasks.append(team.load_season_roster(season=season))
+        if roster_tasks:
+            await asyncio.gather(*roster_tasks)
 
         url = f'http://sports.core.api.espn.com/{self._espn_instance.v}/sports/{self.api_info["sport"]}/leagues/{self.api_info["league"]}/seasons/{season}/types/2/leaders'
 
         try:
-            leaders_content = fetch_espn_data(url)
-            leaders = []
+            leaders_content = await fetch_espn_data(url, self.espn_instance.session)
+            categories = []
+            for cat_item in leaders_content.get('categories', []):
+                 categories.append(LeaderCategory(leader_cat_json=cat_item,
+                                               espn_instance=self._espn_instance,
+                                               season=season))
+            
+            load_tasks = [c.load() for c in categories]
+            await asyncio.gather(*load_tasks)
 
-            with ThreadPoolExecutor() as executor:
-                # Submit a task for each category to fetch leader data concurrently
-                future_to_category = {
-                    executor.submit(self.fetch_leader_category, category, season): category
-                    for category in leaders_content.get('categories', [])
-                }
-
-                # Collect results as they complete
-                for future in as_completed(future_to_category):
-                    try:
-                        category_data = future.result()
-                        leaders.append(category_data)
-                    except Exception as e:
-                        print(f"Error fetching leader category: {e}")
-
-            self._league_leaders[season] = leaders
-
+            self._league_leaders[season] = categories
+            return categories
         except API400Error as e:
             print(f"Failed to fetch league leaders for season {season}: {e}")
 

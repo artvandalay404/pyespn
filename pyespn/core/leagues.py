@@ -1,11 +1,11 @@
 import json
-import requests
-from pyespn.utilities import lookup_league_api_info
+from pyespn.utilities import lookup_league_api_info, fetch_espn_data
 from pyespn.data.version import espn_api_version as v
 from pyespn.classes import League
+import aiohttp
 
 
-def get_league_info_core(league_abbv, espn_instance) -> League:
+async def get_league_info_core(league_abbv, espn_instance, session: aiohttp.ClientSession) -> League:
     """
     Retrieves information about a specific sports league.
 
@@ -19,8 +19,7 @@ def get_league_info_core(league_abbv, espn_instance) -> League:
     api_info = lookup_league_api_info(league_abbv=league_abbv)
 
     url = f'http://sports.core.api.espn.com/{v}/sports/{api_info["sport"]}/leagues/{api_info["league"]}'
-    response = requests.get(url)
-    content = json.loads(response.content)
+    content = await fetch_espn_data(url, session)
     current_league = League(league_json=content,
                             espn_instance=espn_instance)
     return current_league
